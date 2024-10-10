@@ -1,0 +1,89 @@
+# Install necessary libraries
+!pip install transformers scikit-learn pandas
+
+# Import libraries
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from transformers import BertTokenizer, BertForSequenceClassification, Trainer, TrainingArguments
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, confusion_matrix
+import torch
+import time
+
+# Load Dataset
+original_data = pd.read_csv('/content/origi-dreaddit-train.csv')
+
+# Split the Data
+def split_data(data, test_size=0.15, validation_size=0.15, random_state=42):
+    train_data, test_data = train_test_split(data, test_size=test_size, random_state=random_state)
+    train_data, validation_data = train_test_split(train_data, test_size=validation_size/(1-test_size), random_state=random_state)
+    return train_data, validation_data, test_data
+
+original_train, original_val, original_test = split_data(original_data)
+
+# Preprocess Data
+def preprocess_data(data, tokenizer):
+    return tokenizer(list(data['text']), padding=True, truncation=True, return_tensors="pt")
+
+class StressDataset(torch.utils.data.Dataset):
+    def __init__(self, encodings, labels):
+        self.encodings = encodings
+        self.labels = labels
+
+    def __getitem__(self, idx):
+        item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
+        item['labels'] = torch.tensor(self.labels[idx])
+        return item
+
+    def __len__(self):
+        return len(self.labels)
+
+# Train and Evaluate Function
+def train_and_evaluate(model_name, train_data, val_data, test_data):
+    tokenizer = BertTokenizer.from_pretrained(model_name)  # Using BERT tokenizer
+    model = BertForSequenceClassification.from_pretrained(model_name)  # Using BERT model
+
+    train_encodings = preprocess_data(train_data, tokenizer)
+    val_encodings = preprocess_data(val_data, tokenizer)
+    test_encodings = preprocess_data(test_data, tokenizer)
+
+    train_dataset = StressDataset(train_encodings, list(train_data['label']))
+    val_dataset = StressDataset(val_encodings, list(val_data['label']))
+    test_dataset = StressDataset(test_encodings, list(test_data['label']))
+
+    training_args = TrainingArguments(
+        output_dir='./results',
+        num_train_epochs=1,  # Reduced number of epochs for faster training
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        warmup_steps=500,
+        weight_decay=0.01,
+        logging_dir='./logs',
+        logging_steps=10,
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset
+    )
+
+    start_time = time.time()
+    trainer.train()
+    end_time = time.time()
+    inference_time = (end_time - start_time) / len(test_dataset)
+
+    predictions = trainer.predict(test_dataset)
+    predicted_labels = predictions.predictions.argmax(axis=1)
+
+    accuracy = accuracy_score(test_dataset.labels, predicted_labels)
+    f1_macro = f1_score(test_dataset.labels, predicted_labels, average='macro')
+    precision = precision_score(test_dataset.labels, predicted_labels, average='macro')
+    recall = recall_score(test_dataset.labels, predicted_labels, average='macro')
+    conf_matrix = confusion_matrix(test_dataset.labels, predicted_labels)
+
+    return accuracy, f1_macro, precision, recall, conf_matrix, inference_time
+
+# Evaluate BERT
+bert_accuracy, bert_f1_macro, bert_precision, bert_recall, bert_conf_matrix, bert_inference_time = train_and_evaluate('bert-base-uncased', original_train, original_val, original_test)
+print(f"BERT (baseline) - Accuracy: {bert_accuracy}, F1 Macro: {bert_f1_macro}, Precision: {bert_precision}, Recall: {bert_recall}, Confusion Matrix: \n{bert_conf_matrix}, Inference Time (per batch): {bert_inference_time}")
